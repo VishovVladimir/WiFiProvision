@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WiFi Setup</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 480px;
+         margin: 0 auto; padding: 16px 14px 40px; background: #14161c; color: #e6e8ee; }
+  h1 { font-size: 1.25rem; margin: .2em 0 .1em; color: #7cc4ff; }
+  h2 { font-size: .95rem; margin: 1.3em 0 .4em; color: #9fb2d0; font-weight: 600;
+       text-transform: uppercase; letter-spacing: .04em; }
+  .sub { color: #7d879c; font-size: .8rem; margin: 0 0 .6em; }
+  label { display: block; font-size: .82rem; color: #9aa4b8; margin: .7em 0 .2em; }
+  input, select { width: 100%; padding: .55em .6em; background: #1e2230; color: #f0f2f7;
+    border: 1px solid #333a4d; border-radius: 7px; font-size: .95rem; }
+  input:focus, select:focus { outline: none; border-color: #4a90d9; }
+  button { font: inherit; cursor: pointer; border: 0; border-radius: 7px; }
+  .btn { display: block; width: 100%; padding: .7em; margin-top: .9em; background: #2f6fd0;
+    color: #fff; font-weight: 600; font-size: .98rem; }
+  .btn:active { background: #245bad; }
+  .btn.sec { background: #333a4d; }
+  .btn.danger { background: #7a2b2b; }
+  ul { list-style: none; padding: 0; margin: .3em 0; }
+  li { display: flex; align-items: center; gap: 6px; background: #1e2230; border: 1px solid #2a3140;
+    border-radius: 8px; padding: .5em .6em; margin: .35em 0; }
+  li .name { flex: 1; font-size: .92rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  li .rank { color: #7d879c; font-size: .8rem; margin-right: 4px; }
+  li button { width: 34px; height: 32px; background: #2a3242; color: #cdd6e6; font-size: 1rem; }
+  li button.del { background: #4a2530; color: #ff9b9b; }
+  li button:active { filter: brightness(1.3); }
+  .empty { color: #7d879c; font-size: .85rem; font-style: italic; }
+  .msg { min-height: 1.3em; margin: .8em 0 0; font-size: .85rem; color: #7cc4ff; white-space: pre-wrap; }
+  hr { border: 0; border-top: 1px solid #262c3a; margin: 1.2em 0; }
+  .status { font-size: .82rem; color: #9aa4b8; }
+  .status b { color: #e6e8ee; }
+</style>
+</head>
+<body>
+  <h1>&#128246; WiFi Setup</h1>
+  <p class="sub" id="ap">Configure this device's WiFi connection.</p>
+
+  <h2>Add network</h2>
+  <label for="sel">Available networks</label>
+  <select id="sel"><option value="">Scanning&hellip;</option></select>
+  <label for="man">Or enter SSID manually</label>
+  <input id="man" placeholder="Network name" autocomplete="off">
+  <label for="pw">Password</label>
+  <input id="pw" type="password" placeholder="Leave blank for open network" autocomplete="off">
+  <button class="btn" onclick="save()">Save &amp; Connect</button>
+
+  <h2>Saved networks</h2>
+  <p class="sub">Top of the list connects first. Use &#9650;/&#9660; to reorder, &#10005; to delete.</p>
+  <ul id="list"><li class="empty">None saved yet.</li></ul>
+
+  <div id="settings" style="display:none">
+    <h2>Device settings</h2>
+    <div id="fields"></div>
+    <button class="btn sec" onclick="saveFields()">Save settings</button>
+  </div>
+
+  <hr>
+  <h2>Status</h2>
+  <p class="status" id="stat">&hellip;</p>
+  <button class="btn danger" onclick="factoryReset()">Factory reset</button>
+
+  <p class="msg" id="msg"></p>
+
+<script>
+const $ = id => document.getElementById(id);
+const M = $('msg');
+function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function post(url, body){
+  return fetch(url, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body})
+    .then(r => r.text());
+}
+
+// ── Scan ──────────────────────────────────────────────────────────────
+function scan(){
+  fetch('/wifi/scan').then(r => r.status === 202 ? null : r.json()).then(a => {
+    if (!a){ setTimeout(scan, 1800); return; }
+    const sel = $('sel');
+    const cur = sel.value;
+    a.sort((x, y) => y.rssi - x.rssi);
+    sel.innerHTML = '<option value="">-- choose a network --</option>' +
+      a.map(x => `<option value="${esc(x.ssid)}">${esc(x.ssid)} (${x.rssi} dBm)${x.sec?' &#128274;':''}</option>`).join('');
+    if (cur) sel.value = cur;
+    setTimeout(scan, 6000);
+  }).catch(() => setTimeout(scan, 3000));
+}
+
+// ── Saved networks ────────────────────────────────────────────────────
+function loadNets(){
+  fetch('/api/networks').then(r => r.json()).then(a => {
+    const list = $('list');
+    if (!a.length){ list.innerHTML = '<li class="empty">None saved yet.</li>'; return; }
+    list.innerHTML = a.map(n => `<li>
+        <span class="rank">${n.i + 1}.</span>
+        <span class="name">${esc(n.ssid)}</span>
+        <button onclick="move(${n.i},'up')" title="Higher priority">&#9650;</button>
+        <button onclick="move(${n.i},'down')" title="Lower priority">&#9660;</button>
+        <button class="del" onclick="del(${n.i})" title="Delete">&#10005;</button>
+      </li>`).join('');
+  });
+}
+function save(){
+  const ssid = ($('man').value.trim() || $('sel').value).trim();
+  if (!ssid){ M.textContent = 'Enter or pick a network first.'; return; }
+  M.textContent = 'Saving…';
+  post('/wifi/save', 'ssid=' + encodeURIComponent(ssid) + '&pass=' + encodeURIComponent($('pw').value))
+    .then(t => { M.textContent = t; $('man').value = ''; $('pw').value = ''; setTimeout(loadNets, 500); });
+}
+function del(i){ post('/wifi/delete', 'index=' + i).then(() => loadNets()); }
+function move(i, dir){ post('/wifi/priority', 'index=' + i + '&dir=' + dir).then(() => loadNets()); }
+function factoryReset(){
+  if (!confirm('Delete ALL saved networks and reboot?')) return;
+  post('/reset', '').then(t => M.textContent = t);
+}
+
+// ── Custom fields ─────────────────────────────────────────────────────
+function loadFields(){
+  fetch('/api/fields').then(r => r.json()).then(a => {
+    if (!a.length) return;
+    $('settings').style.display = 'block';
+    $('fields').innerHTML = a.map(f =>
+      `<label for="f_${esc(f.key)}">${esc(f.label)}</label>
+       <input id="f_${esc(f.key)}" data-key="${esc(f.key)}" value="${esc(f.value)}">`).join('');
+  });
+}
+function saveFields(){
+  const body = [...document.querySelectorAll('#fields input')]
+    .map(el => 'cf_' + encodeURIComponent(el.dataset.key) + '=' + encodeURIComponent(el.value)).join('&');
+  post('/api/fields', body).then(t => M.textContent = t);
+}
+
+// ── Status ────────────────────────────────────────────────────────────
+function loadStatus(){
+  fetch('/api/status').then(r => r.json()).then(d => {
+    $('ap').textContent = 'AP: ' + d.ap;
+    let s = 'State: <b>' + esc(d.state) + '</b>';
+    if (d.connected) s += ' &mdash; <b>' + esc(d.ssid) + '</b> @ ' + esc(d.ip);
+    s += ' &mdash; ' + d.count + ' saved';
+    $('stat').innerHTML = s;
+  }).catch(() => {}).finally(() => setTimeout(loadStatus, 4000));
+}
+
+scan(); loadNets(); loadFields(); loadStatus();
+</script>
+</body>
+</html>

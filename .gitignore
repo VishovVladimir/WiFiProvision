@@ -1,0 +1,17 @@
+# PlatformIO / build
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Generated LittleFS assets (produced by scripts/gzip_web.py)
+data/
+
+# Arduino build output
+build/
+*.bin
+*.elf
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
