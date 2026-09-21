@@ -6,18 +6,39 @@
 #include <LittleFS.h>
 #include <ESPmDNS.h>
 #include <esp_system.h>
+#include <esp_wifi.h>
 
 using namespace wp;
 
 // ── Identity: AP SSID and hostname from the low 3 bytes of the eFuse MAC ─────
 static void initIds(Context& ctx) {
     uint32_t id = (uint32_t)(ESP.getEfuseMac() & 0xFFFFFF);
-    snprintf(ctx.apSsid, sizeof(ctx.apSsid), "%s-%06X", ctx.cfg.deviceName, id);
+    if (ctx.cfg.apSsid && ctx.cfg.apSsid[0]) {
+        strlcpy(ctx.apSsid, ctx.cfg.apSsid, sizeof(ctx.apSsid));
+    } else {
+        snprintf(ctx.apSsid, sizeof(ctx.apSsid), "%s-%06X", ctx.cfg.deviceName, id);
+    }
     if (ctx.cfg.hostname && ctx.cfg.hostname[0]) {
         strlcpy(ctx.hostname, ctx.cfg.hostname, sizeof(ctx.hostname));
     } else {
         snprintf(ctx.hostname, sizeof(ctx.hostname), "%s-%06x", ctx.cfg.deviceName, id);
     }
+}
+
+// ── HTTP server lifecycle ────────────────────────────────────────────────────
+// Must only start after WiFi.mode(): that brings up the lwIP TCP/IP task the
+// server binds to.
+static void serverStart(Context& ctx) {
+    if (ctx.started) return;
+    if (!ctx.routes) { httpSetup(ctx); ctx.routes = true; }
+    ctx.server.begin();
+    ctx.started = true;
+}
+
+static void serverStop(Context& ctx) {
+    if (!ctx.started) return;
+    ctx.server.close();
+    ctx.started = false;
 }
 
 // ── Portal lifecycle ─────────────────────────────────────────────────────────
@@ -32,6 +53,7 @@ static void startPortal(Context& ctx) {
 
     ctx.dns.setErrorReplyCode(DNSReplyCode::NoError);
     ctx.dns.start(kDnsPort, "*", kApIp);
+    serverStart(ctx);
     WiFi.scanNetworks(true);  // start an async scan for the portal's dropdown
     ctx.portalActive = true;
     ctx.state = WPState::Portal;
@@ -44,25 +66,21 @@ static void stopPortal(Context& ctx) {
     ctx.dns.stop();
     WiFi.softAPdisconnect(true);
     ctx.portalActive = false;
+    if (!ctx.cfg.serverInSta) serverStop(ctx);  // hand port 80 back to the app
 }
 
 // ── Single blocking STA attempt (runs inside the task) ───────────────────────
 static bool connectOne(Context& ctx, const WPNetwork& net) {
     Serial.printf("[WiFiProv] Trying \"%s\"…\n", net.ssid);
-    WiFi.begin(net.ssid, net.pass);
+    WiFi.begin(net.ssid, net.pass[0] ? net.pass : nullptr);  // "" = open network
     uint32_t t0 = millis();
     while (millis() - t0 < ctx.cfg.connectTimeoutMs) {
         if (WiFi.status() == WL_CONNECTED) return true;
-        ctx.server.handleClient();  // stay responsive during the wait
+        if (ctx.stopReq) break;
+        if (ctx.started) ctx.server.handleClient();  // stay responsive during the wait
         vTaskDelay(pdMS_TO_TICKS(100));
     }
-    return false;
-}
-
-static bool ssidVisible(const String& ssid, int scanCount) {
-    for (int i = 0; i < scanCount; ++i) {
-        if (WiFi.SSID(i) == ssid) return true;
-    }
+    WiFi.disconnect();  // abandon this one cleanly before begin() on the next
     return false;
 }
 
@@ -70,72 +88,131 @@ static void onConnected(Context& ctx) {
     stopPortal(ctx);
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);  // low-latency RX; every reference project did this
+    if (ctx.cfg.mdns) {
+        MDNS.end();
+        if (MDNS.begin(ctx.hostname)) MDNS.addService("http", "tcp", 80);
+    }
+    // Last: an app watching state() may take port 80 as soon as it reads Connected.
     ctx.state = WPState::Connected;
-    MDNS.end();
-    if (MDNS.begin(ctx.hostname)) MDNS.addService("http", "tcp", 80);
     Serial.printf("[WiFiProv] Connected: %s  IP %s  (%s.local)\n",
                   WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), ctx.hostname);
 }
 
-// Try saved networks by priority, preferring ones visible in a fresh scan.
-// Opens the portal if nothing connects (unless disabled).
-static void connectOrPortal(Context& ctx) {
-    if (ctx.netCount == 0) { startPortal(ctx); return; }
+// Try saved networks by priority. Pass 1 (repeated connectRounds times): the ones
+// visible in a fresh scan. Pass 2 (once): the rest — hidden SSIDs, or missed by
+// the scan. Works on a copy, so the list may change meanwhile.
+static bool connectSaved(Context& ctx) {
+    static WPNetwork nets[WP_MAX_NETWORKS];  // only ever used by this task
+    uint8_t n;
+    {
+        Lock l(ctx);
+        n = ctx.netCount;
+        memcpy(nets, ctx.networks, sizeof(WPNetwork) * n);
+    }
+    if (n == 0) return false;
 
     ctx.state = WPState::Connecting;
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
-    int n = WiFi.scanNetworks();  // synchronous; fine inside the task
+    bool autoRc = WiFi.getAutoReconnect();
+    WiFi.setAutoReconnect(false);  // this loop decides what to try next
+    WiFi.disconnect();             // a pending reconnect would stall the scan
 
-    bool tried[WP_MAX_NETWORKS] = {false};
-    // Pass 1: saved networks that are currently visible, in priority order.
-    for (uint8_t i = 0; i < ctx.netCount; ++i) {
-        if (ssidVisible(ctx.networks[i].ssid, n)) {
-            tried[i] = true;
-            if (connectOne(ctx, ctx.networks[i])) { WiFi.scanDelete(); onConnected(ctx); return; }
-        }
-    }
-    // Pass 2: the rest (hidden SSIDs or missed by the scan), in priority order.
-    for (uint8_t i = 0; i < ctx.netCount; ++i) {
-        if (!tried[i] && connectOne(ctx, ctx.networks[i])) {
-            WiFi.scanDelete(); onConnected(ctx); return;
+    bool visible[WP_MAX_NETWORKS] = {false};
+    int found = WiFi.scanNetworks();  // synchronous; fine inside the task
+    for (int k = 0; k < found; ++k) {
+        String s = WiFi.SSID(k);
+        for (uint8_t i = 0; i < n; ++i) {
+            if (s == nets[i].ssid) visible[i] = true;
         }
     }
     WiFi.scanDelete();
 
-    if (ctx.cfg.startPortalOnFail) { startPortal(ctx); }
+    bool ok = false;
+    uint8_t rounds = ctx.cfg.connectRounds ? ctx.cfg.connectRounds : 1;
+    for (uint8_t r = 0; r < rounds && !ok && !ctx.stopReq; ++r) {
+        for (uint8_t i = 0; i < n && !ok && !ctx.stopReq; ++i) {
+            if (visible[i]) ok = connectOne(ctx, nets[i]);
+        }
+    }
+    for (uint8_t i = 0; i < n && !ok && !ctx.stopReq; ++i) {
+        if (!visible[i]) ok = connectOne(ctx, nets[i]);
+    }
+    memset(nets, 0, sizeof(nets));  // do not keep passwords around
+    WiFi.setAutoReconnect(autoRc);
+    return ok;
+}
+
+// Opens the portal if nothing connects and portalOnFail is set.
+static void connectOrPortal(Context& ctx, bool portalOnFail) {
+    if (connectSaved(ctx)) { onConnected(ctx); return; }
+    if (ctx.stopReq) return;
+    if (portalOnFail) { startPortal(ctx); }
     else { ctx.state = WPState::Error; Serial.println("[WiFiProv] No network connected."); }
 }
 
-// ── Background task ──────────────────────────────────────────────────────────
-static const uint32_t kReconnectIntervalMs = 30000;
+// Empty list at boot: adopt the network the WiFi driver still holds in NVS (a
+// previous firmware's credentials). esp_wifi_init() loaded it, so the driver
+// must be up (WiFi.mode) before this runs.
+static void importDriverConfig(Context& ctx) {
+    Lock l(ctx);
+    if (ctx.netCount) return;
+    wifi_config_t conf;
+    if (esp_wifi_get_config(WIFI_IF_STA, &conf) != ESP_OK || !conf.sta.ssid[0]) return;
+    char ssid[33] = {0}, pass[65] = {0};
+    memcpy(ssid, conf.sta.ssid, 32);
+    memcpy(pass, conf.sta.password, 64);
+    if (netAdd(ctx, ssid, pass) >= 0) {
+        storeSaveNetworks(ctx);
+        Serial.printf("[WiFiProv] Imported \"%s\" from the driver config\n", ssid);
+    }
+}
 
+// end(): release everything the task owns. The radio itself is stopped by end().
+static void teardown(Context& ctx) {
+    serverStop(ctx);
+    if (ctx.cfg.mdns) MDNS.end();
+    WiFi.setAutoReconnect(false);  // a disconnect must not trigger a new connect
+    if (ctx.portalActive) {
+        ctx.dns.stop();
+        WiFi.softAPdisconnect(false);
+        ctx.portalActive = false;
+    } else {
+        WiFi.disconnect(false);
+    }
+}
+
+// ── Background task ──────────────────────────────────────────────────────────
 static void netTask(void* arg) {
     Context& ctx = *static_cast<Context*>(arg);
 
-    initIds(ctx);
     WiFi.persistent(false);
     WiFi.setHostname(ctx.hostname);
 
     if (!LittleFS.begin(true)) {
         Serial.println("[WiFiProv] LittleFS mount failed — serving built-in portal page.");
     }
-    storeLoadNetworks(ctx);
-    storeLoadFields(ctx);
 
-    // WiFi.mode() (inside connectOrPortal/startPortal) must run before
-    // server.begin(): it brings up the lwIP TCP/IP task the server binds to.
-    connectOrPortal(ctx);
+    WiFi.mode(WIFI_STA);
+    if (ctx.cfg.importDriverConfig) importDriverConfig(ctx);
+    // persistent(false) only takes effect if this task initialised the driver;
+    // the app may have done so already. Our own list is the source of truth, so
+    // keep begin() from rewriting the driver's NVS copy on every attempt.
+    esp_wifi_set_storage(WIFI_STORAGE_RAM);
 
-    httpSetup(ctx);
-    ctx.server.begin();
-    ctx.started = true;
+    connectOrPortal(ctx, ctx.cfg.startPortalOnFail);
+    if (ctx.cfg.serverInSta) serverStart(ctx);
 
-    uint32_t lastReconnect = millis();
+    uint32_t lastAttempt = millis();
     for (;;) {
+        if (ctx.stopReq) {
+            teardown(ctx);
+            ctx.stopped = true;
+            vTaskDelete(nullptr);
+        }
         if (ctx.pendingRestart) { vTaskDelay(pdMS_TO_TICKS(1200)); esp_restart(); }
 
-        ctx.server.handleClient();
+        if (ctx.started) ctx.server.handleClient();
         if (ctx.portalActive) ctx.dns.processNextRequest();
 
         if (ctx.requestPortalReq) {
@@ -145,8 +222,8 @@ static void netTask(void* arg) {
         if (ctx.applyConnectReq) {
             ctx.applyConnectReq = false;
             stopPortal(ctx);
-            connectOrPortal(ctx);
-            lastReconnect = millis();
+            connectOrPortal(ctx, ctx.cfg.startPortalOnFail);
+            lastAttempt = millis();
         }
 
         // Auto-recovery when running as STA (not while the portal is up).
@@ -156,11 +233,12 @@ static void netTask(void* arg) {
             } else {
                 if (ctx.state == WPState::Connected) {
                     ctx.state = WPState::Connecting;
+                    lastAttempt = millis();  // the driver's auto-reconnect goes first
                     Serial.println("[WiFiProv] Connection lost — will retry.");
                 }
-                if (millis() - lastReconnect > kReconnectIntervalMs) {
-                    lastReconnect = millis();
-                    connectOrPortal(ctx);
+                if (millis() - lastAttempt > ctx.cfg.reconnectIntervalMs) {
+                    connectOrPortal(ctx, ctx.cfg.portalOnReconnectFail);
+                    lastAttempt = millis();
                 }
             }
         }
@@ -180,12 +258,21 @@ void WiFiProvision::begin(const char* deviceName) {
 }
 
 void WiFiProvision::begin(const WPConfig& cfg) {
+    if (_ctx->task) return;
     _ctx->cfg = cfg;
+    initIds(*_ctx);
+    // Loaded here rather than in the task, so the list API is valid (and cannot
+    // be overwritten by a late load) as soon as begin() returns.
+    {
+        Lock l(*_ctx);
+        storeLoadNetworks(*_ctx);
+    }
+    storeLoadFields(*_ctx);
     // Single-core parts (C3/H2) have no core 1 to pin to.
 #if defined(CONFIG_FREERTOS_UNICORE) || (portNUM_PROCESSORS == 1)
-    xTaskCreate(netTask, "wifiprov", 8192, _ctx, 3, nullptr);
+    xTaskCreate(netTask, "wifiprov", 8192, _ctx, cfg.taskPriority, &_ctx->task);
 #else
-    xTaskCreatePinnedToCore(netTask, "wifiprov", 8192, _ctx, 3, nullptr, 0);
+    xTaskCreatePinnedToCore(netTask, "wifiprov", 8192, _ctx, cfg.taskPriority, &_ctx->task, 0);
 #endif
 }
 
@@ -197,8 +284,61 @@ String WiFiProvision::apSsid() const { return String(_ctx->apSsid); }
 void WiFiProvision::requestPortal() { _ctx->requestPortalReq = true; }
 
 void WiFiProvision::resetNetworks() {
-    storeReset(*_ctx);
+    clearNetworks();
     _ctx->pendingRestart = true;
+}
+
+uint8_t WiFiProvision::networkCount() const {
+    Lock l(*_ctx);
+    return _ctx->netCount;
+}
+
+String WiFiProvision::networkSsid(uint8_t index) const {
+    Lock l(*_ctx);
+    return index < _ctx->netCount ? String(_ctx->networks[index].ssid) : String();
+}
+
+int WiFiProvision::addNetwork(const char* ssid, const char* pass) {
+    Lock l(*_ctx);
+    int idx = netAdd(*_ctx, ssid, pass);
+    if (idx >= 0) storeSaveNetworks(*_ctx);
+    return idx;
+}
+
+bool WiFiProvision::removeNetwork(uint8_t index) {
+    Lock l(*_ctx);
+    if (!netDelete(*_ctx, index)) return false;
+    storeSaveNetworks(*_ctx);
+    return true;
+}
+
+bool WiFiProvision::moveNetwork(uint8_t index, bool up) {
+    Lock l(*_ctx);
+    if (!netMove(*_ctx, index, up)) return false;
+    storeSaveNetworks(*_ctx);
+    return true;
+}
+
+void WiFiProvision::clearNetworks() {
+    Lock l(*_ctx);
+    storeReset(*_ctx);
+}
+
+void WiFiProvision::end(uint32_t timeoutMs) {
+    if (!_ctx->task) return;
+    if (!_ctx->stopped) {
+        _ctx->stopReq = true;
+        uint32_t t0 = millis();
+        while (!_ctx->stopped && millis() - t0 < timeoutMs) vTaskDelay(pdMS_TO_TICKS(10));
+        if (!_ctx->stopped) {
+            // Stuck in a driver call. Freeze it so it cannot touch WiFi after the
+            // stop below; end() is a one-way street (deep sleep / restart) anyway.
+            vTaskSuspend(_ctx->task);
+            Serial.println("[WiFiProv] end(): task did not stop in time, suspended");
+        }
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));  // let the tcpip thread drain its backlog
+    esp_wifi_stop();
 }
 
 void WiFiProvision::addCustomField(const char* key, const char* defaultValue, const char* label) {

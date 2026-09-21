@@ -66,19 +66,38 @@ void storeSaveFields(Context& ctx) {
 // ── In-RAM list operations ───────────────────────────────────────────────────
 
 int netAdd(Context& ctx, const char* ssid, const char* pass) {
-    if (!ssid || !ssid[0]) return -1;
-    // Update the password if this SSID is already saved (keeps its priority).
+    if (!ssid || !ssid[0] || strlen(ssid) >= sizeof(WPNetwork::ssid)) return -1;
+    if (pass && strlen(pass) >= sizeof(WPNetwork::pass)) return -1;
+    int found = -1;
     for (uint8_t i = 0; i < ctx.netCount; ++i) {
-        if (strncmp(ctx.networks[i].ssid, ssid, sizeof(ctx.networks[i].ssid)) == 0) {
-            strlcpy(ctx.networks[i].pass, pass ? pass : "", sizeof(ctx.networks[i].pass));
-            return i;
-        }
+        if (strncmp(ctx.networks[i].ssid, ssid, sizeof(ctx.networks[i].ssid)) == 0) { found = i; break; }
     }
-    if (ctx.netCount >= WP_MAX_NETWORKS) return -1;  // list full
-    WPNetwork& n = ctx.networks[ctx.netCount];
-    strlcpy(n.ssid, ssid, sizeof(n.ssid));
-    strlcpy(n.pass, pass ? pass : "", sizeof(n.pass));
-    return ctx.netCount++;
+
+    if (!ctx.cfg.newestFirst) {
+        // Update the password if this SSID is already saved (keeps its priority).
+        if (found >= 0) {
+            strlcpy(ctx.networks[found].pass, pass ? pass : "", sizeof(ctx.networks[found].pass));
+            return found;
+        }
+        if (ctx.netCount >= WP_MAX_NETWORKS) return -1;  // list full
+        WPNetwork& n = ctx.networks[ctx.netCount];
+        strlcpy(n.ssid, ssid, sizeof(n.ssid));
+        strlcpy(n.pass, pass ? pass : "", sizeof(n.pass));
+        return ctx.netCount++;
+    }
+
+    // newestFirst: the entry (new or re-saved) goes to index 0 and the rest shift
+    // down one; when the list is full the last (lowest-priority) entry falls off.
+    int from = found;
+    if (from < 0) {
+        if (ctx.netCount < WP_MAX_NETWORKS) ctx.netCount++;
+        from = ctx.netCount - 1;
+    }
+    memmove(&ctx.networks[1], &ctx.networks[0], sizeof(WPNetwork) * from);
+    memset(&ctx.networks[0], 0, sizeof(WPNetwork));
+    strlcpy(ctx.networks[0].ssid, ssid, sizeof(ctx.networks[0].ssid));
+    strlcpy(ctx.networks[0].pass, pass ? pass : "", sizeof(ctx.networks[0].pass));
+    return 0;
 }
 
 bool netDelete(Context& ctx, int index) {
@@ -87,6 +106,7 @@ bool netDelete(Context& ctx, int index) {
         ctx.networks[i] = ctx.networks[i + 1];
     }
     ctx.netCount--;
+    memset(&ctx.networks[ctx.netCount], 0, sizeof(WPNetwork));  // no stale password in RAM
     return true;
 }
 

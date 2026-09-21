@@ -114,6 +114,7 @@ void httpSetup(Context& ctx) {
 
     // ── Saved network list (priority order, no passwords) ────────────────────
     s.on("/api/networks", HTTP_GET, [&ctx]() {
+        Lock l(ctx);
         String j = "[";
         for (uint8_t i = 0; i < ctx.netCount; ++i) {
             if (i) j += ',';
@@ -128,13 +129,17 @@ void httpSetup(Context& ctx) {
         String ssid = ctx.server.arg("ssid");
         String pass = ctx.server.arg("pass");
         if (ssid.isEmpty()) { ctx.server.send(400, "text/plain", "SSID is required"); return; }
-        int idx = netAdd(ctx, ssid.c_str(), pass.c_str());
+        int idx;
+        {
+            Lock l(ctx);
+            idx = netAdd(ctx, ssid.c_str(), pass.c_str());
+            if (idx >= 0) storeSaveNetworks(ctx);
+        }
         if (idx < 0) {
             ctx.server.send(507, "text/plain",
                             "Network list is full (max " + String(WP_MAX_NETWORKS) + ")");
             return;
         }
-        storeSaveNetworks(ctx);
         ctx.server.send(200, "text/plain", "Saved. Connecting to \"" + ssid + "\"…");
         ctx.applyConnectReq = true;  // reconnect using the updated list (drops the portal)
     });
@@ -142,6 +147,7 @@ void httpSetup(Context& ctx) {
     // ── Delete a saved network ───────────────────────────────────────────────
     s.on("/wifi/delete", HTTP_POST, [&ctx]() {
         int idx = ctx.server.arg("index").toInt();
+        Lock l(ctx);
         if (!netDelete(ctx, idx)) { ctx.server.send(400, "text/plain", "Bad index"); return; }
         storeSaveNetworks(ctx);
         ctx.server.send(200, "text/plain", "Deleted");
@@ -151,6 +157,7 @@ void httpSetup(Context& ctx) {
     s.on("/wifi/priority", HTTP_POST, [&ctx]() {
         int  idx = ctx.server.arg("index").toInt();
         bool up  = ctx.server.arg("dir") == "up";
+        Lock l(ctx);
         if (!netMove(ctx, idx, up)) { ctx.server.send(400, "text/plain", "Cannot move"); return; }
         storeSaveNetworks(ctx);
         ctx.server.send(200, "text/plain", "Reordered");
@@ -192,7 +199,7 @@ void httpSetup(Context& ctx) {
 
     // ── Factory reset (clears the list, then reboots) ────────────────────────
     s.on("/reset", HTTP_POST, [&ctx]() {
-        storeReset(ctx);
+        { Lock l(ctx); storeReset(ctx); }
         ctx.server.send(200, "text/plain", "Cleared. Rebooting…");
         ctx.pendingRestart = true;
     });

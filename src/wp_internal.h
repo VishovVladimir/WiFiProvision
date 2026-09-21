@@ -4,6 +4,8 @@
 #include <Arduino.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include "WiFiProvision.h"
 
 namespace wp {
@@ -32,8 +34,12 @@ struct Context {
     char apSsid[33]   = {0};
     char hostname[33] = {0};
 
+    // The list is changed from the app's tasks (public API) as well as this
+    // library's task (portal routes) -> every access holds `lock`.
     WPNetwork networks[WP_MAX_NETWORKS];
     uint8_t   netCount = 0;
+    StaticSemaphore_t lockBuf;
+    SemaphoreHandle_t lock = xSemaphoreCreateMutexStatic(&lockBuf);
 
     CustomField fields[WP_MAX_CUSTOM_FIELDS];
     uint8_t fieldCount = 0;
@@ -43,10 +49,21 @@ struct Context {
     volatile bool    pendingRestart   = false;  // deferred reboot after a destructive save
     volatile bool    requestPortalReq = false;  // portal requested at runtime
     volatile bool    applyConnectReq  = false;  // re-run the connect sequence
+    volatile bool    stopReq          = false;  // end(): wind the task down
+    volatile bool    stopped          = false;  // the task has finished its teardown
+    TaskHandle_t     task             = nullptr;
 
     WebServer server{80};
     DNSServer dns;
-    bool      started = false;
+    bool      started = false;   // server listening
+    bool      routes  = false;   // routes registered (once)
+};
+
+// RAII holder for Context::lock.
+struct Lock {
+    explicit Lock(Context& c) : m(c.lock) { xSemaphoreTake(m, portMAX_DELAY); }
+    ~Lock() { xSemaphoreGive(m); }
+    SemaphoreHandle_t m;
 };
 
 // ── Store (WPStore.cpp) ──────────────────────────────────────────────────────
@@ -56,7 +73,8 @@ void storeLoadFields(Context& ctx);      // overrides field values from NVS
 void storeSaveFields(Context& ctx);      // persists all field values to NVS
 void storeReset(Context& ctx);           // clears the saved network list in NVS
 
-// Network-list operations (in-RAM; caller persists via storeSaveNetworks).
+// Network-list operations (in-RAM; caller holds ctx.lock and persists via
+// storeSaveNetworks).
 int  netAdd(Context& ctx, const char* ssid, const char* pass);  // add/update, returns index or -1 if full
 bool netDelete(Context& ctx, int index);
 bool netMove(Context& ctx, int index, bool up);

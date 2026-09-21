@@ -1,6 +1,6 @@
 {
   "name": "WiFiProvision",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Drop-in ESP32 WiFi provisioning: captive-portal soft-AP, network scan, manual entry, up to 10 saved networks with editable priority and delete, and a gzipped portal UI served from LittleFS. Synchronous WebServer, no external dependencies. Works across the whole ESP32 family (classic, S3, C3, H2, ...).",
   "keywords": "wifi, esp32, captive-portal, provisioning, wifimanager, littlefs, softap",
   "authors": [

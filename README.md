@@ -77,11 +77,21 @@ page (no data upload needed).
 ```cpp
 struct WPConfig {
   const char* deviceName        = "ESP32";  // AP SSID prefix -> "<name>-AABBCC"
+  const char* apSsid            = nullptr;  // full AP SSID; overrides "<name>-AABBCC"
   const char* apPassword        = nullptr;  // null/"" = open AP; else WPA2 (>= 8 chars)
   uint32_t    connectTimeoutMs  = 15000;    // per-network STA attempt
+  uint8_t     connectRounds     = 1;        // passes over the visible saved networks
   uint32_t    portalTimeoutMs   = 0;        // reserved
-  bool        startPortalOnFail = true;     // raise portal if nothing connects
+  bool        startPortalOnFail = true;     // raise portal if nothing connects at boot
   const char* hostname          = nullptr;  // mDNS/host name; default "<name>-aabbcc"
+  uint32_t    reconnectIntervalMs = 30000;  // link lost: re-run the connect sequence after this
+  bool        portalOnReconnectFail = true; // ...and raise the portal if that finds nothing
+  bool        serverInSta       = true;     // false: HTTP server only while the portal is up
+  bool        mdns              = true;     // announce hostname.local on connect
+  bool        newestFirst       = false;    // new networks go to the top; a full list
+                                            // drops its lowest-priority entry
+  bool        importDriverConfig = false;   // empty list: adopt the driver's stored network
+  UBaseType_t taskPriority      = 3;
 };
 
 void      begin(const char* deviceName);
@@ -94,10 +104,28 @@ String    apSsid() const;
 void      requestPortal();                  // force the portal open at runtime (e.g. a button)
 void      resetNetworks();                  // clear the saved list, then reboot
 
+// Saved networks (index 0 = highest priority); thread-safe, persisted at once.
+uint8_t   networkCount() const;
+String    networkSsid(uint8_t index) const; // never exposes the password
+int       addNetwork(const char* ssid, const char* pass);  // index, or -1
+bool      removeNetwork(uint8_t index);
+bool      moveNetwork(uint8_t index, bool up);
+void      clearNetworks();                  // resetNetworks() without the reboot
+
+void      end(uint32_t timeoutMs = 5000);   // stop task/portal/server/radio (before deep sleep)
+
 // Custom portal fields (register before begin(); persisted to NVS):
 void      addCustomField(const char* key, const char* defaultValue, const char* label = nullptr);
 String    getCustomField(const char* key) const;
 ```
+
+### Sharing port 80 with the application
+
+With `serverInSta = false` the library's HTTP server (and its captive `onNotFound`)
+runs only while the portal is up. Start your own server once `state() == Connected`
+(the portal server is closed by then). Set `portalOnReconnectFail = false` as well, so a
+lost link never raises the portal while your server holds the port. Manage the list
+from your own UI through the network-list API above.
 
 ### Custom fields
 
@@ -117,8 +145,10 @@ They render in a **Device settings** section of the portal and survive reboots.
 - **Async scan** endpoint (`/wifi/scan`) — the page polls and sorts by signal strength.
 - **Storage:** a single NVS blob (`Preferences`, namespace `wifiprov`) holds the network list;
   array order *is* the priority, so reorder is a swap and delete is a splice.
-- **Connect logic:** scan once, try visible saved networks in priority order, then the rest;
-  the first that connects wins. Falls back to the portal (configurable).
+- **Connect logic:** scan once, try visible saved networks in priority order
+  (`connectRounds` passes), then the rest once; the first that connects wins. Falls back to
+  the portal (configurable). A lost link gets `reconnectIntervalMs` for the driver's own
+  auto-reconnect, then the whole sequence runs again.
 - **UI:** gzipped `portal.html` streamed from LittleFS with `Content-Encoding: gzip`; a compact
   PROGMEM fallback covers a missing filesystem image.
 
