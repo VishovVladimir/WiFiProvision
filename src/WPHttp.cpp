@@ -17,6 +17,7 @@ input,select,button{width:100%;padding:.5em;margin:.25em 0;box-sizing:border-box
 li{display:flex;gap:6px;align-items:center;margin:.2em 0}li span{flex:1}</style></head><body>
 <h3>Add network</h3>
 <select id=sel><option value="">scanning…</option></select>
+<button onclick="scan(1)">Rescan</button>
 <input id=man placeholder="or type SSID">
 <input id=pw type=password placeholder=password>
 <button onclick=save()>Save &amp; connect</button>
@@ -25,14 +26,14 @@ li{display:flex;gap:6px;align-items:center;margin:.2em 0}li span{flex:1}</style>
 <pre id=msg></pre>
 <script>
 var M=msg;function j(u,o){return fetch(u,o).then(r=>r.json())}
-function scan(){fetch('/wifi/scan').then(r=>r.status==202?(setTimeout(scan,1800),null):r.json()).then(a=>{if(!a)return;a.sort((x,y)=>y.rssi-x.rssi);sel.innerHTML='<option value="">-- pick --</option>'+a.map(x=>`<option>${x.ssid}</option>`).join('')})}
+function scan(r){fetch('/wifi/scan'+(r?'?refresh=1':'')).then(r=>r.status==202?(setTimeout(scan,1500),null):r.json()).then(a=>{if(!a)return;a.sort((x,y)=>y.rssi-x.rssi);sel.innerHTML='<option value="">-- pick --</option>'+a.map(x=>`<option>${x.ssid}</option>`).join('')})}
 function load(){j('/api/networks').then(a=>{list.innerHTML=a.map(n=>`<li><span>${n.i+1}. ${n.ssid}</span><button onclick="mv(${n.i},1)">▲</button><button onclick="mv(${n.i},0)">▼</button><button onclick="del(${n.i})">✕</button></li>`).join('')})}
 function P(u,b){return fetch(u,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b}).then(r=>r.text())}
 function save(){var s=(man.value.trim()||sel.value).trim();if(!s){M.textContent='SSID required';return}M.textContent='Saving…';P('/wifi/save','ssid='+encodeURIComponent(s)+'&pass='+encodeURIComponent(pw.value)).then(t=>M.textContent=t)}
 function del(i){P('/wifi/delete','index='+i).then(load)}
 function mv(i,u){P('/wifi/priority','index='+i+'&dir='+(u?'up':'down')).then(load)}
 function reset(){if(confirm('Clear all saved networks?'))P('/reset','').then(t=>M.textContent=t)}
-scan();load();
+load();setTimeout(scan,500);
 </script></body></html>)HTML";
 
 static String jsonEscape(const String& s) {
@@ -57,21 +58,66 @@ static const char* stateName(WPState s) {
     }
 }
 
+// Content type from the extension. Only what a portal page can reference.
+static const char* mimeFor(const String& path) {
+    if (path.endsWith(".html")) return "text/html";
+    if (path.endsWith(".css"))  return "text/css";
+    if (path.endsWith(".js"))   return "application/javascript";
+    if (path.endsWith(".json")) return "application/json";
+    if (path.endsWith(".svg"))  return "image/svg+xml";
+    if (path.endsWith(".png"))  return "image/png";
+    if (path.endsWith(".ico"))  return "image/x-icon";
+    if (path.endsWith(".woff2"))return "font/woff2";
+    return "text/plain";
+}
+
+// Serves anything scripts/gzip_web.py packed into LittleFS: "/x" is looked up as
+// "/x.gz" first, then "/x". This is what lets a project drop extra pages and
+// assets (its own stylesheet, a control page) into web/ and have them served
+// without touching the library.
+static bool serveStatic(Context& ctx, const String& path) {
+    if (path.isEmpty() || path[0] != '/' || path.indexOf("..") >= 0) return false;
+    String gz = path + ".gz";
+    String f  = LittleFS.exists(gz) ? gz : (LittleFS.exists(path) ? path : String());
+    if (f.isEmpty()) return false;
+    File file = LittleFS.open(f, "r");
+    if (!file || file.isDirectory()) return false;
+    // Assets are immutable between filesystem uploads; the page itself is not.
+    ctx.server.sendHeader("Cache-Control", path.endsWith(".html") ? "no-cache" : "max-age=86400");
+    // No Content-Encoding here: streamFile() adds it for a ".gz" name by itself.
+    ctx.server.streamFile(file, mimeFor(path));
+    file.close();
+    return true;
+}
+
 static void servePortal(Context& ctx) {
-    if (LittleFS.exists("/portal.html.gz")) {
-        File f = LittleFS.open("/portal.html.gz", "r");
-        ctx.server.sendHeader("Content-Encoding", "gzip");
-        ctx.server.sendHeader("Cache-Control", "no-cache");
-        ctx.server.streamFile(f, "text/html");
-        f.close();
-    } else {
-        ctx.server.send_P(200, "text/html", kFallbackHtml);
-    }
+    if (serveStatic(ctx, "/portal.html")) return;
+    // Nothing in LittleFS (no filesystem image uploaded) — built-in page.
+    ctx.server.sendHeader("Cache-Control", "no-cache");
+    ctx.server.send_P(200, "text/html", kFallbackHtml);
 }
 
 static void captiveRedirect(Context& ctx) {
-    ctx.server.sendHeader("Location", "http://4.3.2.1/", true);
+    // no-store: a cached 302 for a probe URL keeps the phone in "portal" state
+    // long after it has joined a real network.
+    ctx.server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    ctx.server.sendHeader("Location", "http://" + kApIp.toString() + "/", true);
     ctx.server.send(302, "text/plain", "");
+}
+
+// A scan takes the radio off the AP channel for a couple of seconds: while it
+// runs the soft-AP answers nothing, so the phone's page load stalls and its TCP
+// connections reset. Scans are therefore on demand only and rate-limited, and
+// they use a shorter dwell time than the 300 ms/channel default (~1.7 s total
+// instead of ~4 s). Nothing rescans in the background.
+static const uint32_t kScanMinIntervalMs = 10000;
+
+static void startScan(Context& ctx) {
+    if (WiFi.scanComplete() == WIFI_SCAN_RUNNING) return;
+    uint32_t now = millis();
+    if (ctx.lastScanMs && now - ctx.lastScanMs < kScanMinIntervalMs) return;
+    ctx.lastScanMs = now;
+    WiFi.scanNetworks(true, false, false, 120);
 }
 
 void httpSetup(Context& ctx) {
@@ -82,8 +128,13 @@ void httpSetup(Context& ctx) {
 
     // ── OS captive-portal detection probes (force the login page to open) ────
     s.on("/generate_204",        HTTP_GET, [&ctx]() { captiveRedirect(ctx); });
+    s.on("/gen_204",             HTTP_GET, [&ctx]() { captiveRedirect(ctx); });
     s.on("/redirect",            HTTP_GET, [&ctx]() { captiveRedirect(ctx); });
     s.on("/ncsi.txt",            HTTP_GET, [&ctx]() { captiveRedirect(ctx); });
+    s.on("/library/test/success.html", HTTP_GET, [&ctx]() { servePortal(ctx); });
+    s.on("/favicon.ico",         HTTP_GET, [&ctx]() {
+        if (!serveStatic(ctx, "/favicon.svg")) ctx.server.send(404, "text/plain", "");
+    });
     s.on("/hotspot-detect.html", HTTP_GET, [&ctx]() { servePortal(ctx); });
     s.on("/canonical.html",      HTTP_GET, [&ctx]() { servePortal(ctx); });
     s.on("/success.txt",         HTTP_GET, [&ctx]() { ctx.server.send(200, "text/plain", "success"); });
@@ -94,10 +145,13 @@ void httpSetup(Context& ctx) {
     });
 
     // ── WiFi scan (async; 202 while running, then a JSON array) ──────────────
+    // The last result set stays cached and is re-served for free; "?refresh=1"
+    // asks for a new scan. See startScan() for why this is not a background poll.
     s.on("/wifi/scan", HTTP_GET, [&ctx]() {
+        if (ctx.server.hasArg("refresh")) startScan(ctx);
         int16_t n = WiFi.scanComplete();
         if (n == WIFI_SCAN_RUNNING) { ctx.server.send(202, "application/json", "[]"); return; }
-        if (n < 0) { WiFi.scanNetworks(true); ctx.server.send(202, "application/json", "[]"); return; }
+        if (n < 0) { startScan(ctx); ctx.server.send(202, "application/json", "[]"); return; }
         String j = "[";
         for (int16_t i = 0; i < n; ++i) {
             if (i) j += ',';
@@ -108,7 +162,6 @@ void httpSetup(Context& ctx) {
             j += '}';
         }
         j += ']';
-        WiFi.scanNetworks(true);  // kick the next scan for the following poll
         ctx.server.send(200, "application/json", j);
     });
 
@@ -204,8 +257,13 @@ void httpSetup(Context& ctx) {
         ctx.pendingRestart = true;
     });
 
-    // Catch-all → drive unknown hosts to the portal.
-    s.onNotFound([&ctx]() { captiveRedirect(ctx); });
+    // Catch-all → serve a packed asset if we have one, else drive the client to
+    // the portal. The asset lookup must come first: the stylesheet and any extra
+    // page a project ships live in LittleFS, not in a route.
+    s.onNotFound([&ctx]() {
+        if (serveStatic(ctx, ctx.server.uri())) return;
+        captiveRedirect(ctx);
+    });
 }
 
 }  // namespace wp

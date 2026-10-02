@@ -34,8 +34,10 @@ automatically. Pick or type a network, tap **Save & Connect**, done. It reconnec
 
 ## PlatformIO setup
 
-The portal UI ships as `web/portal.html` and is gzipped into your project's `data/` folder by a
-bundled pre-build hook, then flashed as the LittleFS image.
+The portal UI ships as `web/` (the page, the `vovan-io_style` stylesheet and a favicon) and is
+gzipped into your project's `data/` folder by a bundled pre-build hook, then flashed as the
+LittleFS image. Drop your own pages or assets into a `web/` folder in your project and they are
+packed and served the same way — that is how a device gets its control pages in the same style.
 
 ```ini
 [env:esp32dev]
@@ -149,8 +151,13 @@ They render in a **Device settings** section of the portal and survive reboots.
   (`connectRounds` passes), then the rest once; the first that connects wins. Falls back to
   the portal (configurable). A lost link gets `reconnectIntervalMs` for the driver's own
   auto-reconnect, then the whole sequence runs again.
-- **UI:** gzipped `portal.html` streamed from LittleFS with `Content-Encoding: gzip`; a compact
-  PROGMEM fallback covers a missing filesystem image.
+- **UI:** [vovan-io_style](https://github.com/) design system, `data-theme="modern"` — the
+  stylesheet is vendored verbatim into `web/vovan-io.css`, so components use its classes and
+  tokens and nothing hardcodes a colour. Update it by re-copying the file from that repo.
+- **Static files:** anything in `web/` is packed to `data/<name>.gz` and served from LittleFS;
+  a request for `/x` resolves `/x.gz` first. The pre-build hook strips remote `@import` rules
+  from CSS, since the AP has no internet and the font stacks fall back to system faces.
+  A compact PROGMEM fallback page covers a missing filesystem image.
 
 ## Configuration macros
 

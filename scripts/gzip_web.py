@@ -17,18 +17,36 @@ Then flash the filesystem:  pio run -t buildfs && pio run -t uploadfs
 Import("env")  # noqa: F821  (injected by PlatformIO/SCons)
 
 import gzip
+import inspect
 import os
+import re
 
 proj = env["PROJECT_DIR"]  # noqa: F821
 data_dir = os.path.join(proj, "data")
 
-# web/ shipped with the library (this file is <lib>/scripts/gzip_web.py)
-script_dir = os.path.dirname(os.path.abspath(__file__))
+# web/ shipped with the library (this file is <lib>/scripts/gzip_web.py).
+# SCons exec()s extra scripts without defining __file__, so take the path from
+# the frame instead — SCons compiles the script under its real filename.
+script_dir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
 lib_web = os.path.join(os.path.dirname(script_dir), "web")
 # optional per-project override
 proj_web = os.path.join(proj, "web")
 
 os.makedirs(data_dir, exist_ok=True)
+
+
+# The portal AP has no internet. A remote @import (the design system pulls its
+# webfonts from Google Fonts) would resolve to our own captive DNS, hit the
+# portal's 302 and fail — a wasted round-trip on a single-threaded server for
+# every page load. The font stacks all end in a system fallback, so strip it.
+REMOTE_IMPORT = re.compile(rb"@import\s+url\(\s*['\"]?https?:[^)]*\)\s*;", re.I)
+
+
+def strip_remote_imports(raw, rel):
+    out, n = REMOTE_IMPORT.subn(b"", raw)
+    if n:
+        print("[WiFiProvision] %s: dropped %d remote @import (no internet on the AP)" % (rel, n))
+    return out
 
 
 def pack(src_dir):
@@ -45,6 +63,8 @@ def pack(src_dir):
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             with open(src, "rb") as fi:
                 raw = fi.read()
+            if fn.endswith(".css"):
+                raw = strip_remote_imports(raw, rel)
             # mtime=0 keeps the output byte-identical across rebuilds.
             with gzip.GzipFile(filename=dst, mode="wb", compresslevel=9, mtime=0) as fo:
                 fo.write(raw)

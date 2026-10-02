@@ -45,16 +45,33 @@ static void serverStop(Context& ctx) {
 static void startPortal(Context& ctx) {
     // AP_STA so the portal can scan for networks without dropping AP clients.
     WiFi.mode(WIFI_MODE_APSTA);
+    // The 5th argument is the DNS server offered to DHCP clients. Leave it out
+    // and the core skips the DHCP DNS option entirely (NetworkInterface::config
+    // only sets it when it is non-zero): the phone then joins with no resolver,
+    // never asks our DNSServer anything, and no captive portal ever opens.
+    // The 4th (lease start) stays 0 = default, i.e. the address after the AP's.
+#if defined(ESP_ARDUINO_VERSION) && ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+    WiFi.softAPConfig(kApIp, kApIp, kApSubnet, IPAddress((uint32_t)0), kApIp);
+#else
     WiFi.softAPConfig(kApIp, kApIp, kApSubnet);
+#endif
     bool ok = (ctx.cfg.apPassword && strlen(ctx.cfg.apPassword) >= 8)
                   ? WiFi.softAP(ctx.apSsid, ctx.cfg.apPassword)
                   : WiFi.softAP(ctx.apSsid);
     if (!ok) { ctx.state = WPState::Error; return; }
 
+#if defined(ESP_IDF_VERSION) && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 2)
+    // RFC 8910 DHCP option 114: hands the portal URL to the client directly.
+    // Recent iOS/Android open the portal from this alone, without a probe.
+    WiFi.AP.enableDhcpCaptivePortal();
+#endif
+
     ctx.dns.setErrorReplyCode(DNSReplyCode::NoError);
+    ctx.dns.setTTL(0);  // do not let the phone cache our hijacked answers
     ctx.dns.start(kDnsPort, "*", kApIp);
     serverStart(ctx);
-    WiFi.scanNetworks(true);  // start an async scan for the portal's dropdown
+    // No scan here: it would take the radio off the AP channel exactly while the
+    // phone is loading the page. The portal asks for one over /wifi/scan.
     ctx.portalActive = true;
     ctx.state = WPState::Portal;
     Serial.printf("[WiFiProv] Portal up: SSID \"%s\"  http://%s\n",

@@ -4,119 +4,135 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WiFi Setup</title>
-<style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body { font-family: system-ui, -apple-system, sans-serif; max-width: 480px;
-         margin: 0 auto; padding: 16px 14px 40px; background: #14161c; color: #e6e8ee; }
-  h1 { font-size: 1.25rem; margin: .2em 0 .1em; color: #7cc4ff; }
-  h2 { font-size: .95rem; margin: 1.3em 0 .4em; color: #9fb2d0; font-weight: 600;
-       text-transform: uppercase; letter-spacing: .04em; }
-  .sub { color: #7d879c; font-size: .8rem; margin: 0 0 .6em; }
-  label { display: block; font-size: .82rem; color: #9aa4b8; margin: .7em 0 .2em; }
-  input, select { width: 100%; padding: .55em .6em; background: #1e2230; color: #f0f2f7;
-    border: 1px solid #333a4d; border-radius: 7px; font-size: .95rem; }
-  input:focus, select:focus { outline: none; border-color: #4a90d9; }
-  button { font: inherit; cursor: pointer; border: 0; border-radius: 7px; }
-  .btn { display: block; width: 100%; padding: .7em; margin-top: .9em; background: #2f6fd0;
-    color: #fff; font-weight: 600; font-size: .98rem; }
-  .btn:active { background: #245bad; }
-  .btn.sec { background: #333a4d; }
-  .btn.danger { background: #7a2b2b; }
-  ul { list-style: none; padding: 0; margin: .3em 0; }
-  li { display: flex; align-items: center; gap: 6px; background: #1e2230; border: 1px solid #2a3140;
-    border-radius: 8px; padding: .5em .6em; margin: .35em 0; }
-  li .name { flex: 1; font-size: .92rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  li .rank { color: #7d879c; font-size: .8rem; margin-right: 4px; }
-  li button { width: 34px; height: 32px; background: #2a3242; color: #cdd6e6; font-size: 1rem; }
-  li button.del { background: #4a2530; color: #ff9b9b; }
-  li button:active { filter: brightness(1.3); }
-  .empty { color: #7d879c; font-size: .85rem; font-style: italic; }
-  .msg { min-height: 1.3em; margin: .8em 0 0; font-size: .85rem; color: #7cc4ff; white-space: pre-wrap; }
-  hr { border: 0; border-top: 1px solid #262c3a; margin: 1.2em 0; }
-  .status { font-size: .82rem; color: #9aa4b8; }
-  .status b { color: #e6e8ee; }
-</style>
+<link rel="icon" href="/favicon.svg">
+<!-- vovan-io_style design system, vendored into web/. Components and tokens are
+     documented in that repo's AGENTS.md — never hardcode a colour or font here,
+     use a class or a CSS custom property from the stylesheet. -->
+<link rel="stylesheet" href="/vovan-io.css">
 </head>
 <body>
-  <h1>&#128246; WiFi Setup</h1>
-  <p class="sub" id="ap">Configure this device's WiFi connection.</p>
+<div class="app" data-theme="modern" id="app">
+<div class="pcb" aria-hidden="true"></div>
+<div class="wrap">
 
-  <h2>Add network</h2>
-  <label for="sel">Available networks</label>
-  <select id="sel"><option value="">Scanning&hellip;</option></select>
-  <label for="man">Or enter SSID manually</label>
-  <input id="man" placeholder="Network name" autocomplete="off">
-  <label for="pw">Password</label>
-  <input id="pw" type="password" placeholder="Leave blank for open network" autocomplete="off">
-  <button class="btn" onclick="save()">Save &amp; Connect</button>
-
-  <h2>Saved networks</h2>
-  <p class="sub">Top of the list connects first. Use &#9650;/&#9660; to reorder, &#10005; to delete.</p>
-  <ul id="list"><li class="empty">None saved yet.</li></ul>
-
-  <div id="settings" style="display:none">
-    <h2>Device settings</h2>
-    <div id="fields"></div>
-    <button class="btn sec" onclick="saveFields()">Save settings</button>
+  <div class="screen-head">
+    <div class="title">WIFI // <b>SETUP</b></div>
+    <div class="ap" id="ap">AP: &mdash;</div>
   </div>
 
-  <hr>
-  <h2>Status</h2>
-  <p class="status" id="stat">&hellip;</p>
-  <button class="btn danger" onclick="factoryReset()">Factory reset</button>
+  <section class="hud-panel"><span class="corner-tl"></span><span class="corner-br"></span>
+    <div class="label">Add Network</div>
 
-  <p class="msg" id="msg"></p>
+    <ul class="netlist" id="netlist"></ul>
+    <div class="empty" id="scanning">// scanning&hellip;</div>
+    <button class="btn btn--ghost btn--sm" id="rescan" onclick="scan(true)">Rescan</button>
+
+    <div class="section-divider"></div>
+    <div class="field"><label for="man">SSID</label>
+      <input id="man" class="input" placeholder="pick one above, or type it" autocomplete="off">
+    </div>
+    <div class="field"><label for="pw">Password</label>
+      <input id="pw" class="input" type="password" placeholder="leave blank for an open network" autocomplete="off">
+    </div>
+    <button class="btn" onclick="save()">Save &amp; Connect</button>
+    <div class="msg" id="msg"></div>
+  </section>
+
+  <section class="hud-panel"><span class="corner-tl"></span><span class="corner-br"></span>
+    <div class="label">Saved Networks</div>
+    <p class="mono dim" style="font-size:11px;margin:-8px 0 12px">Top of the list connects first. Use &#9650;/&#9660; to reorder, &#10005; to delete.</p>
+    <ul class="savedlist" id="list"></ul>
+    <div class="empty" id="empty">// none saved yet</div>
+  </section>
+
+  <div id="settings" style="display:none">
+    <section class="hud-panel"><span class="corner-tl"></span><span class="corner-br"></span>
+      <div class="label">Device Settings</div>
+      <div id="fields"></div>
+      <button class="btn btn--ghost" onclick="saveFields()">Save Settings</button>
+    </section>
+  </div>
+
+  <section class="hud-panel"><span class="corner-tl"></span><span class="corner-br"></span>
+    <div class="label">Status</div>
+    <dl class="statgrid" id="statgrid"><dt>State</dt><dd>&hellip;</dd></dl>
+    <div class="section-divider"></div>
+    <button class="btn btn--alert" onclick="factoryReset()">Factory Reset</button>
+  </section>
+
+  <div class="footer">:: <b>WiFiProvision</b> ::</div>
+
+</div>
+</div>
 
 <script>
 const $ = id => document.getElementById(id);
 const M = $('msg');
 function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function say(text, token){ M.textContent = text; M.style.color = token ? `var(--${token})` : ''; }
 function post(url, body){
   return fetch(url, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body})
     .then(r => r.text());
 }
 
 // ── Scan ──────────────────────────────────────────────────────────────
-function scan(){
-  fetch('/wifi/scan').then(r => r.status === 202 ? null : r.json()).then(a => {
-    if (!a){ setTimeout(scan, 1800); return; }
-    const sel = $('sel');
-    const cur = sel.value;
+// A scan takes the AP off-channel for a couple of seconds, so this never polls
+// in the background: it waits out a scan in progress, then stops. Refreshing is
+// manual, via the Rescan button.
+function bars(rssi){                      // .meter wants 5 <i>; lit ones get .on
+  const n = rssi >= -55 ? 5 : rssi >= -65 ? 4 : rssi >= -72 ? 3 : rssi >= -80 ? 2 : 1;
+  return '<span class="meter">' + '<i class="on"></i>'.repeat(n) + '<i></i>'.repeat(5 - n) + '</span>';
+}
+function pick(el){
+  [...$('netlist').children].forEach(li => li.classList.toggle('sel', li === el));
+  $('man').value = el.dataset.ssid;
+  $('pw').focus();
+}
+function scan(refresh){
+  $('rescan').disabled = true;
+  if (refresh){ $('netlist').innerHTML = ''; $('scanning').textContent = '// scanning…'; $('scanning').style.display = 'block'; }
+  fetch('/wifi/scan' + (refresh ? '?refresh=1' : '')).then(r => r.status === 202 ? null : r.json()).then(a => {
+    if (!a){ setTimeout(scan, 1500); return; }
     a.sort((x, y) => y.rssi - x.rssi);
-    sel.innerHTML = '<option value="">-- choose a network --</option>' +
-      a.map(x => `<option value="${esc(x.ssid)}">${esc(x.ssid)} (${x.rssi} dBm)${x.sec?' &#128274;':''}</option>`).join('');
-    if (cur) sel.value = cur;
-    setTimeout(scan, 6000);
+    $('scanning').style.display = a.length ? 'none' : 'block';
+    if (!a.length) $('scanning').textContent = '// no networks found';
+    $('netlist').innerHTML = a.map(x => `<li data-ssid="${esc(x.ssid)}" onclick="pick(this)">
+        <span class="ssid">${esc(x.ssid)}</span>
+        <span class="lock">${x.sec ? '&#128274;' : ''}</span>
+        ${bars(x.rssi)}
+        <span class="dbm">${x.rssi} dBm</span>
+      </li>`).join('');
+    $('rescan').disabled = false;
   }).catch(() => setTimeout(scan, 3000));
 }
 
 // ── Saved networks ────────────────────────────────────────────────────
 function loadNets(){
   fetch('/api/networks').then(r => r.json()).then(a => {
-    const list = $('list');
-    if (!a.length){ list.innerHTML = '<li class="empty">None saved yet.</li>'; return; }
+    const list = $('list'), empty = $('empty');
+    if (!a.length){ list.innerHTML = ''; empty.style.display = 'block'; return; }
+    empty.style.display = 'none';
     list.innerHTML = a.map(n => `<li>
-        <span class="rank">${n.i + 1}.</span>
+        <span class="rank">${String(n.i + 1).padStart(2, '0')}</span>
         <span class="name">${esc(n.ssid)}</span>
-        <button onclick="move(${n.i},'up')" title="Higher priority">&#9650;</button>
-        <button onclick="move(${n.i},'down')" title="Lower priority">&#9660;</button>
-        <button class="del" onclick="del(${n.i})" title="Delete">&#10005;</button>
+        <button class="iconbtn" onclick="move(${n.i},'up')" title="Higher priority">&#9650;</button>
+        <button class="iconbtn" onclick="move(${n.i},'down')" title="Lower priority">&#9660;</button>
+        <button class="iconbtn del" onclick="del(${n.i})" title="Delete">&#10005;</button>
       </li>`).join('');
   });
 }
 function save(){
-  const ssid = ($('man').value.trim() || $('sel').value).trim();
-  if (!ssid){ M.textContent = 'Enter or pick a network first.'; return; }
-  M.textContent = 'Saving…';
+  const ssid = $('man').value.trim();
+  if (!ssid){ say('Pick a network above, or type its name.', 'alert'); return; }
+  say('Saving…', 'info');
   post('/wifi/save', 'ssid=' + encodeURIComponent(ssid) + '&pass=' + encodeURIComponent($('pw').value))
-    .then(t => { M.textContent = t; $('man').value = ''; $('pw').value = ''; setTimeout(loadNets, 500); });
+    .then(t => { say(t, 'info'); $('man').value = ''; $('pw').value = ''; setTimeout(loadNets, 500); });
 }
 function del(i){ post('/wifi/delete', 'index=' + i).then(() => loadNets()); }
 function move(i, dir){ post('/wifi/priority', 'index=' + i + '&dir=' + dir).then(() => loadNets()); }
 function factoryReset(){
   if (!confirm('Delete ALL saved networks and reboot?')) return;
-  post('/reset', '').then(t => M.textContent = t);
+  post('/reset', '').then(t => say(t, 'alert'));
 }
 
 // ── Custom fields ─────────────────────────────────────────────────────
@@ -125,28 +141,28 @@ function loadFields(){
     if (!a.length) return;
     $('settings').style.display = 'block';
     $('fields').innerHTML = a.map(f =>
-      `<label for="f_${esc(f.key)}">${esc(f.label)}</label>
-       <input id="f_${esc(f.key)}" data-key="${esc(f.key)}" value="${esc(f.value)}">`).join('');
+      `<div class="field"><label for="f_${esc(f.key)}">${esc(f.label)}</label>
+       <input id="f_${esc(f.key)}" class="input" data-key="${esc(f.key)}" value="${esc(f.value)}"></div>`).join('');
   });
 }
 function saveFields(){
   const body = [...document.querySelectorAll('#fields input')]
     .map(el => 'cf_' + encodeURIComponent(el.dataset.key) + '=' + encodeURIComponent(el.value)).join('&');
-  post('/api/fields', body).then(t => M.textContent = t);
+  post('/api/fields', body).then(t => say(t, 'info'));
 }
 
 // ── Status ────────────────────────────────────────────────────────────
 function loadStatus(){
   fetch('/api/status').then(r => r.json()).then(d => {
     $('ap').textContent = 'AP: ' + d.ap;
-    let s = 'State: <b>' + esc(d.state) + '</b>';
-    if (d.connected) s += ' &mdash; <b>' + esc(d.ssid) + '</b> @ ' + esc(d.ip);
-    s += ' &mdash; ' + d.count + ' saved';
-    $('stat').innerHTML = s;
+    let rows = '<dt>State</dt><dd class="amber">' + esc(d.state) + '</dd>';
+    if (d.connected) rows += '<dt>SSID</dt><dd>' + esc(d.ssid) + '</dd><dt>IP addr</dt><dd>' + esc(d.ip) + '</dd>';
+    rows += '<dt>Saved</dt><dd>' + String(d.count).padStart(2, '0') + '</dd>';
+    $('statgrid').innerHTML = rows;
   }).catch(() => {}).finally(() => setTimeout(loadStatus, 4000));
 }
 
-scan(); loadNets(); loadFields(); loadStatus();
+loadNets(); loadFields(); loadStatus(); setTimeout(scan, 500);
 </script>
 </body>
 </html>

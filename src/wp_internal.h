@@ -57,6 +57,7 @@ struct Context {
     DNSServer dns;
     bool      started = false;   // server listening
     bool      routes  = false;   // routes registered (once)
+    uint32_t  lastScanMs = 0;    // rate-limits portal scans (see WPHttp.cpp)
 };
 
 // RAII holder for Context::lock.
