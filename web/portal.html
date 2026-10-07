@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark light">
 <title>WiFi Setup</title>
 <link rel="icon" href="/favicon.svg">
 <!-- vovan-io_style design system, vendored into web/. Components and tokens are
@@ -12,6 +13,15 @@
 </head>
 <body>
 <div class="app" data-theme="modern" id="app">
+<script>
+// Follow the OS theme: "modern" when dark, "light" when light. Runs before the
+// rest of the page renders so a light-mode browser never flashes dark.
+(function(){
+  const m = matchMedia('(prefers-color-scheme: light)'), a = document.getElementById('app');
+  const f = () => { a.dataset.theme = m.matches ? 'light' : 'modern'; };
+  f(); m.addEventListener('change', f);
+})();
+</script>
 <div class="pcb" aria-hidden="true"></div>
 <div class="wrap">
 
